@@ -1,0 +1,7 @@
+config.json
+state.json
+state.json.tmp
+last_id.txt
+.venv/
+__pycache__/
+*.pyc

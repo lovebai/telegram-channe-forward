@@ -1,0 +1,9 @@
+{
+  "bot_token": "YOUR_BOT_TOKEN",
+  "source_channels": ["source_channel_a", "source_channel_b"],
+  "target_channel": "@target_channel",
+  "proxy": null,
+  "check_interval": 60,
+  "request_timeout": 30,
+  "state_file": "state.json"
+}
