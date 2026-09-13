@@ -16,6 +16,30 @@ from telegram.request import HTTPXRequest
 LOG = logging.getLogger(__name__)
 
 
+def describe_error(exc, config):
+    """保留服务端错误原因，但不把 Token、代理和媒体 URL 写入日志。"""
+    detail = str(exc)
+    for key in ("bot_token", "proxy"):
+        secret = config.get(key)
+        if secret:
+            detail = detail.replace(secret, "[已隐藏]")
+    detail = re.sub(r"\b\d+:[A-Za-z0-9_-]+\b", "[Token 已隐藏]", detail)
+    detail = re.sub(r"(?:https?|socks5h?)://[^\s<>]+", "[URL 已隐藏]", detail)
+    detail = " ".join(detail.split())[:1000]
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def error_hint(exc):
+    detail = str(exc).lower()
+    if "chat not found" in detail:
+        return "检查 target_channel 是否正确，以及 Bot 是否已加入目标频道"
+    if any(word in detail for word in ("not enough rights", "forbidden", "administrator", "chat_write_forbidden")):
+        return "检查 Bot 在目标频道的发布消息权限"
+    if any(word in detail for word in ("failed to get http url content", "wrong file identifier", "wrong type of the web page content", "webpage_curl_failed", "media_empty")):
+        return "Telegram 无法读取媒体链接；检查链接有效性及媒体内容，程序代理不控制 Telegram 服务端下载"
+    return ""
+
+
 def load_config(path):
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -118,7 +142,7 @@ async def poll_once(bot, session, config, state):
         try:
             posts = await asyncio.to_thread(fetch_posts, session, channel, state.get(channel, 0), config["request_timeout"])
         except requests.RequestException as exc:
-            LOG.warning("获取频道 %s 失败（%s），下轮重试", channel, type(exc).__name__)
+            LOG.warning("获取频道 %s 失败（%s），下轮重试", channel, describe_error(exc, config))
             continue
         for number, media, unavailable in posts:
             if unavailable:
@@ -127,7 +151,13 @@ async def poll_once(bot, session, config, state):
                 try:
                     await send_post(bot, config["target_channel"], media)
                 except Exception as exc:
-                    LOG.warning("发送 %s/%s 失败（%s），下轮重试", channel, number, type(exc).__name__)
+                    photos = sum(kind == "photo" for kind, _ in media)
+                    videos = sum(kind == "video" for kind, _ in media)
+                    LOG.warning("发送 %s/%s 失败（%s）；图片 %s，视频 %s；保留进度，下轮重试",
+                                channel, number, describe_error(exc, config), photos, videos)
+                    hint = error_hint(exc)
+                    if hint:
+                        LOG.warning("排查建议：%s", hint)
                     break
             state[channel] = number
             save_state(config["state_file"], state)

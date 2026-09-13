@@ -6,6 +6,22 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import requests
 import main
+from telegram.error import BadRequest
+
+
+class ErrorTests(unittest.TestCase):
+    def test_error_details_redact_secrets(self):
+        config = {"bot_token": "123:secret", "proxy": "http://user:password@localhost:7890"}
+        error = RuntimeError("Failed 123:secret http://user:password@localhost:7890 https://cdn.example/a?secret=yes\nnext")
+        detail = main.describe_error(error, config)
+        self.assertIn("RuntimeError: Failed", detail)
+        for secret in ("123:secret", "password", "cdn.example", "\n"):
+            self.assertNotIn(secret, detail)
+
+    def test_bad_request_reason_and_hint(self):
+        error = BadRequest("Chat not found")
+        self.assertIn("Chat not found", main.describe_error(error, {}))
+        self.assertIn("target_channel", main.error_hint(error))
 
 
 class ParsingTests(unittest.TestCase):
@@ -44,6 +60,17 @@ class ParsingTests(unittest.TestCase):
 
 
 class ForwardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_request_logs_reason_without_advancing(self):
+        bot = AsyncMock()
+        bot.send_video.side_effect = BadRequest("Failed to get HTTP URL content")
+        config = {"source_channels": ["a"], "target_channel": "@target", "request_timeout": 30}
+        state = {"a": 1}
+        with patch("main.fetch_posts", return_value=[(2, [("video", "https://x/v")], False)]):
+            with self.assertLogs("main", level="WARNING") as logs:
+                await main.poll_once(bot, Mock(), config, state)
+        self.assertIn("Failed to get HTTP URL content", " ".join(logs.output))
+        self.assertEqual(state, {"a": 1})
+
     async def test_single_photo_skipped_video_sent(self):
         bot = AsyncMock()
         await main.send_post(bot, "@target", [("photo", "https://x/a")])
