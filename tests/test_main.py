@@ -24,6 +24,44 @@ class ErrorTests(unittest.TestCase):
         self.assertIn("target_channel", main.error_hint(error))
 
 
+class HistoryTests(unittest.TestCase):
+    @staticmethod
+    def response(*numbers):
+        return Mock(text=''.join(f'<div class="tgme_widget_message" data-post="abc/{n}"></div>' for n in numbers))
+
+    def test_resume_pages_exclude_boundary_and_deduplicate(self):
+        session = Mock()
+        session.get.side_effect = [self.response(22169, 22174, 22178), self.response(22178, 22183), self.response(22183)]
+        posts = main.fetch_posts(session, 'abc', 22169, 30)
+        self.assertEqual([p[0] for p in posts], [22174, 22178, 22183])
+        self.assertEqual([call.kwargs['params'] for call in session.get.call_args_list],
+                         [{'after': 22169}, {'after': 22178}, {'after': 22183}])
+
+    def test_first_start_only_loads_recent_page(self):
+        session = Mock()
+        session.get.return_value = self.response(100, 105)
+        self.assertEqual([p[0] for p in main.fetch_posts(session, 'abc', 0, 30)], [100, 105])
+        session.get.assert_called_once()
+        self.assertEqual(session.get.call_args.kwargs['params'], {})
+
+    def test_page_budget_and_gaps(self):
+        session = Mock()
+        session.get.side_effect = [self.response(n) for n in [30, 50, 80, 100, 150]]
+        self.assertEqual([p[0] for p in main.fetch_posts(session, 'abc', 20, 30)], [30, 50, 80, 100, 150])
+        self.assertEqual(session.get.call_count, 5)
+
+    def test_later_page_failure_keeps_fetched_posts(self):
+        session = Mock()
+        session.get.side_effect = [self.response(21), requests.Timeout()]
+        self.assertEqual([p[0] for p in main.fetch_posts(session, 'abc', 20, 30)], [21])
+
+    def test_first_page_failure_propagates(self):
+        session = Mock()
+        session.get.side_effect = requests.Timeout()
+        with self.assertRaises(requests.Timeout):
+            main.fetch_posts(session, 'abc', 20, 30)
+
+
 class ParsingTests(unittest.TestCase):
     def test_media_order_duplicates_and_video_source(self):
         html = '''<div class="tgme_widget_message" data-post="abc/12">

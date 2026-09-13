@@ -117,9 +117,29 @@ def parse_posts(html, channel, last_id):
 
 
 def fetch_posts(session, channel, last_id, timeout):
-    response = session.get(f"https://t.me/s/{channel}", timeout=timeout)
-    response.raise_for_status()
-    return parse_posts(response.text, channel, last_id)
+    # 无进度时保留首次运行只看近期消息的行为；有进度则从该编号向后翻页。
+    # 每轮最多五页，让其他源频道也能及时处理。
+    posts = {}
+    cursor = last_id
+    for _ in range(5 if last_id > 0 else 1):
+        try:
+            response = session.get(f"https://t.me/s/{channel}",
+                                   params={"after": cursor} if cursor > 0 else {},
+                                   timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException:
+            if not posts:
+                raise
+            # 后续页失败时先交付已获取的消息，不能让它们一直无法发送。
+            LOG.warning("频道 %s 后续页获取失败，先处理已获取消息，下轮续传", channel)
+            break
+        page = parse_posts(response.text, channel, cursor)
+        if not page:
+            break
+        for number, media, unavailable in page:
+            posts[number] = (number, media, unavailable)
+        cursor = page[-1][0]
+    return [posts[number] for number in sorted(posts)]
 
 
 def download_media(session, kind, url, timeout):
