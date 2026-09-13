@@ -12,6 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.request import HTTPXRequest
+from telegram.error import BadRequest
 
 LOG = logging.getLogger(__name__)
 
@@ -121,20 +122,52 @@ def fetch_posts(session, channel, last_id, timeout):
     return parse_posts(response.text, channel, last_id)
 
 
-async def send_post(bot, target, media):
+def download_media(session, kind, url, timeout):
+    # 限制响应体大小，避免错误链接或超大文件耗尽内存。
+    limit = (10 if kind == "photo" else 50) * 1024 * 1024
+    with session.get(url, timeout=timeout, stream=True) as response:
+        response.raise_for_status()
+        if "text/html" in response.headers.get("Content-Type", "").lower():
+            raise ValueError("媒体链接返回 HTML 页面")
+        data = bytearray()
+        for block in response.iter_content(64 * 1024):
+            data.extend(block)
+            if len(data) > limit:
+                raise ValueError(f"媒体下载超过本程序 {limit // 1024 // 1024} MiB 限制")
+        if not data:
+            raise ValueError("媒体下载内容为空")
+        return bytes(data)
+
+
+async def send_chunk(bot, target, chunk):
+    if len(chunk) == 1:
+        kind, content = chunk[0]
+        if kind == "video":
+            await bot.send_video(chat_id=target, video=content, supports_streaming=True)
+        else:
+            await bot.send_photo(chat_id=target, photo=content)
+    else:
+        items = [InputMediaVideo(content, supports_streaming=True) if kind == "video" else InputMediaPhoto(content) for kind, content in chunk]
+        await bot.send_media_group(chat_id=target, media=items)
+
+
+async def send_post(bot, target, media, session=None, timeout=30):
     if not media or (len(media) == 1 and media[0][0] == "photo"):
         return
     for offset in range(0, len(media), 10):
         chunk = media[offset:offset + 10]
-        if len(chunk) == 1:
-            kind, url = chunk[0]
-            if kind == "video":
-                await bot.send_video(chat_id=target, video=url, supports_streaming=True)
-            else:
-                await bot.send_photo(chat_id=target, photo=url)
-        else:
-            items = [InputMediaVideo(url, supports_streaming=True) if kind == "video" else InputMediaPhoto(url) for kind, url in chunk]
-            await bot.send_media_group(chat_id=target, media=items)
+        try:
+            await send_chunk(bot, target, chunk)
+        except BadRequest as exc:
+            url_errors = ("webpage_curl_failed", "failed to get http url content", "wrong type of the web page content", "webpage_media_empty")
+            if session is None or not any(reason in str(exc).lower() for reason in url_errors):
+                raise
+            LOG.info("Telegram 无法抓取媒体链接，改为通过程序下载并上传（%s 项）", len(chunk))
+            uploads = []
+            for kind, url in chunk:
+                content = await asyncio.to_thread(download_media, session, kind, url, timeout)
+                uploads.append((kind, content))
+            await send_chunk(bot, target, uploads)
 
 
 async def poll_once(bot, session, config, state):
@@ -149,7 +182,7 @@ async def poll_once(bot, session, config, state):
                 LOG.warning("%s/%s 视频无公开下载链接，跳过", channel, number)
             else:
                 try:
-                    await send_post(bot, config["target_channel"], media)
+                    await send_post(bot, config["target_channel"], media, session, config["request_timeout"])
                 except Exception as exc:
                     photos = sum(kind == "photo" for kind, _ in media)
                     videos = sum(kind == "video" for kind, _ in media)

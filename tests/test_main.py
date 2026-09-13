@@ -62,14 +62,31 @@ class ParsingTests(unittest.TestCase):
 class ForwardTests(unittest.IsolatedAsyncioTestCase):
     async def test_bad_request_logs_reason_without_advancing(self):
         bot = AsyncMock()
-        bot.send_video.side_effect = BadRequest("Failed to get HTTP URL content")
+        bot.send_video.side_effect = BadRequest("Chat not found")
         config = {"source_channels": ["a"], "target_channel": "@target", "request_timeout": 30}
         state = {"a": 1}
         with patch("main.fetch_posts", return_value=[(2, [("video", "https://x/v")], False)]):
             with self.assertLogs("main", level="WARNING") as logs:
                 await main.poll_once(bot, Mock(), config, state)
-        self.assertIn("Failed to get HTTP URL content", " ".join(logs.output))
+        self.assertIn("Chat not found", " ".join(logs.output))
         self.assertEqual(state, {"a": 1})
+
+    async def test_url_failure_uploads_downloaded_album(self):
+        bot = AsyncMock()
+        bot.send_media_group.side_effect = [BadRequest('Failed to send message #1: webpage_curl_failed'), None]
+        with patch('main.download_media', return_value=b'image bytes') as download:
+            await main.send_post(bot, '@target', [('photo', 'https://x/a'), ('photo', 'https://x/b')], Mock())
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(bot.send_media_group.await_count, 2)
+        self.assertTrue(all(item.media.input_file_content == b'image bytes' for item in bot.send_media_group.call_args.kwargs['media']))
+
+    async def test_permission_error_does_not_download(self):
+        bot = AsyncMock()
+        bot.send_video.side_effect = BadRequest('Chat not found')
+        with patch('main.download_media') as download:
+            with self.assertRaises(BadRequest):
+                await main.send_post(bot, '@target', [('video', 'https://x/v')], Mock())
+        download.assert_not_called()
 
     async def test_single_photo_skipped_video_sent(self):
         bot = AsyncMock()
